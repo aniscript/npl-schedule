@@ -51,8 +51,93 @@ function getSavedTimezone() {
   }
 }
 
+function getSavedView() {
+  try {
+    const savedView = localStorage.getItem("npl_schedule_view");
+    return savedView === "calendar" ? "calendar" : "list";
+  } catch {
+    return "list";
+  }
+}
+
+function getLocalDateKey(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit", timeZone,
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function CalendarView({ timeZone }) {
+  const [month, setMonth] = useState(() => {
+    const firstMatch = new Date(`${matches[0].date}T${matches[0].timeNPT}:00+05:45`);
+    const [year, monthNumber] = getLocalDateKey(firstMatch, timeZone).split("-").map(Number);
+    return { year, month: monthNumber - 1 };
+  });
+  const monthStart = new Date(Date.UTC(month.year, month.month, 1));
+  const daysInMonth = new Date(Date.UTC(month.year, month.month + 1, 0)).getUTCDate();
+  const leadingDays = monthStart.getUTCDay();
+  const monthLabel = new Intl.DateTimeFormat("en-US", {
+    month: "long", year: "numeric", timeZone: "UTC",
+  }).format(monthStart);
+  const matchesByDate = new Map();
+
+  matches.forEach((match) => {
+    const instant = new Date(`${match.date}T${match.timeNPT}:00+05:45`);
+    const dateKey = getLocalDateKey(instant, timeZone);
+    (matchesByDate.get(dateKey) ?? matchesByDate.set(dateKey, []).get(dateKey)).push({ match, instant });
+  });
+
+  const cells = Array.from({ length: leadingDays + daysInMonth }, (_, index) => {
+    if (index < leadingDays) return null;
+    return index - leadingDays + 1;
+  });
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  function shiftMonth(amount) {
+    const nextMonth = new Date(Date.UTC(month.year, month.month + amount, 1));
+    setMonth({ year: nextMonth.getUTCFullYear(), month: nextMonth.getUTCMonth() });
+  }
+
+  return (
+    <section aria-label="Match calendar" className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 shadow-md">
+      <div className="flex items-center justify-between border-b border-slate-700 p-4">
+        <button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month" className="rounded-lg border border-slate-600 px-3 py-2 text-slate-200 transition hover:border-amber-500 hover:text-amber-400">←</button>
+        <h3 className="text-lg font-bold text-slate-100">{monthLabel}</h3>
+        <button type="button" onClick={() => shiftMonth(1)} aria-label="Next month" className="rounded-lg border border-slate-600 px-3 py-2 text-slate-200 transition hover:border-amber-500 hover:text-amber-400">→</button>
+      </div>
+      <div className="grid grid-cols-7 border-b border-slate-700 bg-slate-900/60">
+        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+          <div key={day} className="px-1 py-2 text-center text-xs font-semibold text-slate-400 sm:py-3">{day}</div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7">
+        {cells.map((day, index) => {
+          const dateKey = day ? `${month.year}-${String(month.month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}` : `empty-${index}`;
+          const dayMatches = day ? matchesByDate.get(dateKey) ?? [] : [];
+          return (
+            <div key={dateKey} className={`min-h-24 border-b border-r border-slate-700/70 p-1 sm:min-h-32 sm:p-2 ${day ? "bg-slate-800/70" : "bg-slate-900/30"}`}>
+              {day && <div className="mb-1 text-right text-xs text-slate-400 sm:text-sm">{day}</div>}
+              <div className="space-y-1">
+                {dayMatches.map(({ match, instant }) => (
+                  <div key={match.id} title={`${match.matchNo}: ${match.teams}`} className="rounded-md border border-amber-500/20 bg-amber-500/10 p-1 text-[10px] leading-tight text-amber-100 sm:p-1.5 sm:text-xs">
+                    <div className="font-bold text-amber-400">{new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone }).format(instant)}</div>
+                    <div className="mt-0.5 hidden sm:block">{match.matchNo}</div>
+                    <div className="mt-0.5 line-clamp-2 hidden text-slate-300 sm:block">{match.teams}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [selectedTimezone, setSelectedTimezone] = useState(getSavedTimezone);
+  const [view, setView] = useState(getSavedView);
   const targetTimezone = selectedTimezone === "auto"
     ? Intl.DateTimeFormat().resolvedOptions().timeZone
     : selectedTimezone;
@@ -64,6 +149,14 @@ function App() {
       // The schedule still works when browser storage is unavailable.
     }
   }, [selectedTimezone]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("npl_schedule_view", view);
+    } catch {
+      // The view toggle still works when browser storage is unavailable.
+    }
+  }, [view]);
 
   return (
     <div className="mx-auto max-w-4xl p-4 sm:p-6">
@@ -92,16 +185,25 @@ function App() {
       </header>
 
       <main>
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 className="border-l-4 border-amber-500 pl-3 text-xl font-bold text-slate-200">
             Tournament Fixtures
           </h2>
-          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-400">
-            Timezone: {targetTimezone}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-400">
+              Timezone: {targetTimezone}
+            </span>
+            <div className="flex rounded-lg border border-slate-700 bg-slate-800 p-1" aria-label="Fixture view">
+              {[{ id: "list", label: "List" }, { id: "calendar", label: "Calendar" }].map((option) => (
+                <button key={option.id} type="button" onClick={() => setView(option.id)} aria-pressed={view === option.id} className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${view === option.id ? "bg-amber-500 text-slate-950" : "text-slate-300 hover:text-white"}`}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <div className="grid gap-4">
+        {view === "calendar" ? <CalendarView timeZone={targetTimezone} /> : <div className="grid gap-4">
           {matches.map((match) => {
             const matchDate = new Date(`${match.date}T${match.timeNPT}:00+05:45`);
             const formattedDate = new Intl.DateTimeFormat("en-US", {
@@ -132,7 +234,7 @@ function App() {
               </article>
             );
           })}
-        </div>
+        </div>}
       </main>
     </div>
   );
